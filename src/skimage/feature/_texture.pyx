@@ -15,6 +15,124 @@ from .._shared.fused_numerics cimport np_anyint as any_int
 
 cnp.import_array()
 
+def modified_graycomatrix(
+        image,
+        distances,
+        angles,
+        levels=None,
+        symmetric=False,
+        normed=False,
+        sentinel_value=-1
+):
+    """Like graycomatrix, it computes the gray-level co-occurence matrix.
+
+    However, unlike the original implementation we provide arguments to exclude
+    regions of the input image from being considered. For example, say you
+    wish to run textural analysis using GLCM on some object of an image, then
+    you would only wish to look at the texture of the object you're interested in.
+    Therefore, segmentation accuracy becomes a limiting factor in the accuracy
+    of your textural analysis, because if segmentation is poor then parts of
+    the background introduce noise into your calculations. Therefore, mechanisms
+    for improving segmentation or ignoring identifiable or plausible background parts of the image
+    are useful in solving this problem.
+
+    Parameters
+    ----------
+    image : array_like
+        Integer typed input image. Only positive valued images are supported.
+        If type is other than uint8, the argument `levels` needs to be set.
+    distances : array_like
+        List of pixel pair distance offsets.
+    angles : array_like
+        List of pixel pair angles in radians.
+    levels : int, optional
+        The input image should contain integers in [0, `levels`-1],
+        where levels indicate the number of gray-levels counted
+        (typically 256 for an 8-bit image). This argument is required for
+        16-bit images or higher and is typically the maximum of the image.
+        As the output matrix is at least `levels` x `levels`, it might
+        be preferable to use binning of the input image rather than
+        large values for `levels`.
+    symmetric : bool, optional
+        If True, the output matrix `P[:, :, d, theta]` is symmetric. This
+        is accomplished by ignoring the order of value pairs, so both
+        (i, j) and (j, i) are accumulated when (i, j) is encountered
+        for a given offset. The default is False.
+    normed : bool, optional
+        If True, normalize each matrix `P[:, :, d, theta]` by dividing
+        by the total number of accumulated co-occurrences for the given
+        offset. The elements of the resulting matrix sum to 1. The
+        default is False.
+    sentinel_value : int
+        Integer input representing the value of background elements in the image.
+        For example, a value of -1 here indicates that if image[i, j] were -1, then
+        (i, j) is a background part of the image. The default is -1
+
+    Returns
+    -------
+    P : 4-D ndarray
+        The gray-level co-occurrence histogram. The value
+        `P[i,j,d,theta]` is the number of times that gray-level `j`
+        occurs at a distance `d` and at an angle `theta` from
+        gray-level `i`. If `normed` is `False`, the output is of
+        type uint32, otherwise it is float64. The dimensions are:
+        levels x levels x number of distances x number of angles.
+    """
+    check_nD(image, 2)
+    check_nD(distances, 1, 'distances')
+    check_nD(angles, 1, 'angles')
+
+    image = np.ascontiguousarray(image)
+
+    image_max = image.max()
+
+    if np.issubdtype(image.dtype, np.floating):
+        raise ValueError(
+            "Float images are not supported by graycomatrix. "
+            "Convert the image to an unsigned integer type."
+        )
+
+    # for image type > 8bit, levels must be set.
+    if image.dtype not in (np.uint8, np.int8) and levels is None:
+        raise ValueError(
+            "The levels argument is required for data types "
+            "other than uint8. The resulting matrix will be at "
+            "least levels ** 2 in size."
+        )
+
+    if levels is None:
+        levels = 256
+
+    if image_max >= levels:
+        raise ValueError(
+            "The maximum grayscale value in the image should be "
+            "smaller than the number of levels."
+        )
+
+    distances = np.ascontiguousarray(distances, dtype=np.float64)
+    angles = np.ascontiguousarray(angles, dtype=np.float64)
+
+    P = np.zeros(
+        (levels, levels, len(distances), len(angles)), dtype=np.uint32, order='C'
+    )
+
+    # count co-occurences
+    _glcm_loop_ignoring_sentinel_values(image, distances, angles, levels, sentinel_value, P)
+
+    # make each GLMC symmetric
+    if symmetric:
+        Pt = np.transpose(P, (1, 0, 2, 3))
+        P = P + Pt
+
+    # normalize each GLCM
+    if normed:
+        P = P.astype(np.float64)
+        glcm_sums = np.sum(P, axis=(0, 1), keepdims=True)
+        glcm_sums[glcm_sums == 0] = 1
+        P /= glcm_sums
+
+    return P
+
 def _glcm_loop(any_int[:, ::1] image, cnp.float64_t[:] distances,
                cnp.float64_t[:] angles, Py_ssize_t levels,
                cnp.uint32_t[:, :, :, ::1] out):
